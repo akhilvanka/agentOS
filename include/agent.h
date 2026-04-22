@@ -77,3 +77,95 @@ typedef struct {
 /* ---- Typed IPC message ---- */
 
 typedef enum {
+    MSG_NONE          = 0,
+    MSG_GOAL_REQUEST  = 1,   /* parent delegates a sub-goal */
+    MSG_PROGRESS      = 2,   /* agent reports progress to parent */
+    MSG_GOAL_DONE     = 3,   /* agent reports goal completion */
+    MSG_GOAL_FAILED   = 4,   /* agent reports goal failure */
+    MSG_DATA          = 5,   /* raw data transfer */
+    MSG_PING          = 6,   /* liveness check */
+    MSG_PONG          = 7,
+    MSG_SHUTDOWN      = 8,   /* ask agent to exit */
+    MSG_OBSERVE_REQ   = 9,   /* request goal snapshot of another agent */
+    MSG_OBSERVE_RESP  = 10,
+} msg_type_t;
+
+typedef struct {
+    msg_type_t  type;
+    agent_id_t  from;
+    agent_id_t  to;
+    uint32_t    seq;
+    union {
+        struct { char goal[52]; uint8_t urgency; uint8_t _pad[3]; } goal_req;
+        struct { uint8_t pct; uint32_t ticks_remaining; }           progress;
+        struct { uint8_t success; char reason[51]; }                 done;
+        struct { uint8_t data[56]; uint8_t len; }                    raw;
+        struct { char goal[52]; uint8_t urgency; uint8_t pct; }      observe;
+    };
+} __attribute__((packed)) message_t;
+
+/* ---- Agent status ---- */
+
+typedef enum {
+    AGENT_EMPTY    = 0,  /* slot unused */
+    AGENT_READY    = 1,  /* runnable */
+    AGENT_RUNNING  = 2,  /* currently on CPU */
+    AGENT_WAITING  = 3,  /* blocked on IPC recv */
+    AGENT_DONE     = 4,  /* goal completed, awaiting reap */
+    AGENT_FAILED   = 5,  /* goal failed */
+    AGENT_SLEEPING = 6,  /* sleeping for N ticks */
+} agent_status_t;
+
+/* ---- RISC-V saved context (all 32 GPRs + PC) ---- */
+
+typedef struct {
+    uint64_t ra, sp, gp, tp;
+    uint64_t t0, t1, t2;
+    uint64_t s0, s1;
+    uint64_t a0, a1, a2, a3, a4, a5, a6, a7;
+    uint64_t s2, s3, s4, s5, s6, s7, s8, s9, s10, s11;
+    uint64_t t3, t4, t5, t6;
+    uint64_t pc;
+    uint64_t sstatus;
+} rv64_ctx_t;
+
+/* ---- Agent contract (Solaris-style formal specification) ---- */
+
+typedef struct {
+    char precondition[48];   /* what must be true before the agent starts */
+    char postcondition[48];  /* what will be true when the goal succeeds */
+    char invariant[48];      /* must remain true throughout execution */
+} agent_contract_t;
+
+/* ---- Agent blueprint (dispatachable agent type) ---- */
+
+typedef struct {
+    char         name[16];            /* short identifier used in shell */
+    char         description[64];     /* human-readable purpose */
+    char         default_goal[MAX_GOAL_LEN];
+    urgency_t    default_urgency;
+    uint32_t     default_deadline;    /* 0 = no deadline */
+    cap_flags_t  default_caps;
+    void       (*entry)(void);        /* agent entry point */
+} agent_blueprint_t;
+
+/* ---- Event flags (bitfield, for agent_wait_event / agent_emit_event) ---- */
+
+#define EVT_CHILD_DONE    (1u << 0)
+#define EVT_CHILD_FAILED  (1u << 1)
+#define EVT_MSG_ARRIVED   (1u << 2)
+#define EVT_DEADLINE_NEAR (1u << 3)   /* fired when deadline_ticks < 50 */
+#define EVT_SHUTDOWN      (1u << 4)   /* OS sends this on kill */
+#define EVT_USER_0        (1u << 8)   /* user-defined events */
+#define EVT_USER_1        (1u << 9)
+#define EVT_USER_2        (1u << 10)
+#define EVT_USER_3        (1u << 11)
+
+/* ---- Agent Control Block ---- */
+
+typedef struct Agent {
+    rv64_ctx_t    ctx;                   /* must be first — trap handler assumes this */
+
+    /* Identity */
+    agent_id_t           id;
+    volatile agent_status_t status;      /* modified by scheduler in trap context */
