@@ -1,27 +1,4 @@
 #pragma once
-/**
- * AgentOS — Core Agent Abstraction
- *
- * Inspired by Microsoft's Project Solara and agentic AI systems research.
- * Target: StarFive JH7110 (Star64 board), RISC-V RV64GC.
- *
- * The fundamental insight: modern processes are dumb executors. They have
- * code, a stack, and a priority number. The OS knows nothing about what
- * they are trying to accomplish.
- *
- * An Agent is different:
- *   - It declares a Goal (what it's trying to accomplish)
- *   - It reports Progress (how close it is to completion)
- *   - It sets a Deadline (when the goal must be done)
- *   - It holds Capabilities (what resources it needs — nothing more)
- *   - It participates in a Hierarchy (parent/child goal delegation)
- *
- * The scheduler uses Goal + Urgency + Progress to allocate CPU time.
- * A stuck agent gets preempted faster. A near-deadline agent gets boosted.
- * A completed agent's children are automatically cleaned up.
- *
- * This makes the OS a participant in goal achievement, not just a referee.
- */
 
 #ifndef __ASSEMBLER__
 #include <stdint.h>
