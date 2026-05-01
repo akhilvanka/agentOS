@@ -207,3 +207,108 @@ void agent_set_contract(const char *pre, const char *post, const char *inv) {
 }
 
 void agent_kill(agent_id_t id) {
+    if (id == 0 || id >= MAX_AGENTS) return;
+    intr_off();
+    Agent *a = &g_agents[id];
+    if (a->status == AGENT_EMPTY || a->status == AGENT_DONE || a->status == AGENT_FAILED) {
+        intr_on();
+        return;
+    }
+    a->status = AGENT_FAILED;
+    a->goal_failures++;
+    kprintf("[AGENT] id=%u '%s' killed by external request\n", id, a->name);
+    /* Notify parent */
+    if (a->parent != AGENT_NONE) {
+        message_t msg;
+        msg.type = MSG_GOAL_FAILED;
+        msg.from = id;
+        msg.to   = a->parent;
+        msg.done.success = 0;
+        strncpy_safe(msg.done.reason, "killed", sizeof(msg.done.reason));
+        agent_send(a->parent, &msg);
+    }
+    intr_on();
+}
+
+void agent_sleep(uint32_t ticks) {
+    intr_off();
+    Agent *a = agent_current();
+    if (a) {
+        a->status      = AGENT_SLEEPING;
+        a->sleep_ticks = ticks;
+    }
+    intr_on();
+    agent_yield();
+}
+
+void agent_yield(void) {
+    /* S-mode ecall goes to M-mode (OpenSBI), bypassing our trap handler.
+     * EBREAK (breakpoint) IS delegated to S-mode (MEDELEG bit 3 = 1).
+     * Use the 4-byte encoding so ctx.pc advance of +4 is always correct.
+     * The "memory" clobber tells the compiler that all cached memory values
+     * may have changed after this call (another agent ran during the yield). */
+    asm volatile(".word 0x00100073" ::: "memory"); /* EBREAK */
+}
+
+/* ---- IPC ---- */
+
+bool agent_send(agent_id_t to, message_t *msg) {
+    if (to >= MAX_AGENTS) return false;
+    Agent *dst = &g_agents[to];
+    if (dst->status == AGENT_EMPTY) return false;
+
+    intr_off();
+
+    if (inbox_full(dst)) {
+        intr_on();
+        return false;
+    }
+
+    msg->from = g_current_agent;
+    dst->inbox[dst->inbox_tail] = *msg;
+    dst->inbox_tail = (dst->inbox_tail + 1) % INBOX_SIZE;
+    dst->messages_recv++;
+
+    Agent *src = agent_current();
+    if (src) src->messages_sent++;
+
+    /* Wake a waiting agent */
+    if (dst->status == AGENT_WAITING) dst->status = AGENT_READY;
+
+    intr_on();
+    return true;
+}
+
+__attribute__((noinline, optimize("O0")))
+bool agent_recv(message_t *out, uint32_t timeout_ticks) {
+    /* Cache the deadline based on g_current_agent's identity.
+     * We re-read g_current_agent on every loop iteration because a context
+     * switch can land us here with a different value than at call time —
+     * the per-agent stack is restored but global state may have changed. */
+    agent_id_t my_id = (agent_id_t)g_current_agent;
+    if (my_id >= MAX_AGENTS || g_agents[my_id].status == AGENT_EMPTY) return false;
+
+    uint64_t deadline = g_ticks + timeout_ticks;
+
+    for (;;) {
+        Agent *a = &g_agents[(agent_id_t)g_current_agent];
+
+        if (!inbox_empty(a)) {
+            intr_off();
+            *out = a->inbox[a->inbox_head];
+            a->inbox_head = (a->inbox_head + 1) % INBOX_SIZE;
+            intr_on();
+            return true;
+        }
+
+        if (timeout_ticks > 0 && g_ticks >= deadline) return false;
+
+        intr_off();
+        a = &g_agents[(agent_id_t)g_current_agent];
+        if (inbox_empty(a)) a->status = AGENT_WAITING;
+        intr_on();
+        agent_yield();
+        /* Compiler barrier: after a context switch, ALL previously cached
+         * memory values (inbox_head, inbox_tail, etc.) may have changed.
+         * Force the compiler to reload from memory on the next iteration. */
+        asm volatile("" ::: "memory");
