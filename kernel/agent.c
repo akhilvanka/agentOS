@@ -42,20 +42,6 @@ static bool inbox_empty(Agent *a) {
 
 /* ---- Goal-directed scheduling priority ---- */
 
-/**
- * Compute a scheduling score for an agent.
- *
- * Score = urgency * (1 + deadline_urgency + progress_bonus)
- *
- * deadline_urgency: rises sharply as deadline approaches (exponential)
- * progress_bonus:   slightly favors agents making active progress
- *
- * This means:
- *   - High-urgency agents always beat low-urgency ones
- *   - Near-deadline agents get boosted within their urgency class
- *   - Agents making progress get a small bonus (positive feedback)
- *   - Stuck agents (no progress delta) get no bonus (natural preemption)
- */
 uint32_t agent_schedule_score(const Agent *a) {
     if (a->status != AGENT_READY && a->status != AGENT_RUNNING)
         return 0;
@@ -242,11 +228,7 @@ void agent_sleep(uint32_t ticks) {
 }
 
 void agent_yield(void) {
-    /* S-mode ecall goes to M-mode (OpenSBI), bypassing our trap handler.
-     * EBREAK (breakpoint) IS delegated to S-mode (MEDELEG bit 3 = 1).
-     * Use the 4-byte encoding so ctx.pc advance of +4 is always correct.
-     * The "memory" clobber tells the compiler that all cached memory values
-     * may have changed after this call (another agent ran during the yield). */
+    
     asm volatile(".word 0x00100073" ::: "memory"); /* EBREAK */
 }
 
@@ -281,10 +263,7 @@ bool agent_send(agent_id_t to, message_t *msg) {
 
 __attribute__((noinline, optimize("O0")))
 bool agent_recv(message_t *out, uint32_t timeout_ticks) {
-    /* Cache the deadline based on g_current_agent's identity.
-     * We re-read g_current_agent on every loop iteration because a context
-     * switch can land us here with a different value than at call time —
-     * the per-agent stack is restored but global state may have changed. */
+    
     agent_id_t my_id = (agent_id_t)g_current_agent;
     if (my_id >= MAX_AGENTS || g_agents[my_id].status == AGENT_EMPTY) return false;
 
