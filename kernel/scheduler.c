@@ -15,13 +15,6 @@ extern bool     agent_send(agent_id_t to, message_t *msg);
 
 /* ---- Goal-directed scheduler ---- */
 
-/**
- * Advance timer-based state: sleep countdowns and deadline timers.
- * Called ONLY on real timer interrupts (not on EBREAK yields).
- * Decoupling this from pick_next ensures sleep_ticks means real time, not
- * number of context switches — a sleeping agent isn't woken early just
- * because other agents yield rapidly.
- */
 static void advance_timers(void) {
     for (agent_id_t i = 1; i < MAX_AGENTS; ++i) {
         Agent *a = &g_agents[i];
@@ -59,11 +52,6 @@ static void advance_timers(void) {
     }
 }
 
-/**
- * Pick the next agent by goal-directed priority score.
- * Returns AGENT_NONE if all agents are done/failed/empty.
- * Returns idle (0) if agents are alive but temporarily blocked.
- */
 static agent_id_t pick_next(void) {
     agent_id_t best_id    = AGENT_NONE;
     uint32_t   best_score = 0;
