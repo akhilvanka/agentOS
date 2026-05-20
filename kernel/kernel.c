@@ -125,3 +125,131 @@ static void demo_anom_main(void) {
     message_t msg;
     for (int total = 0; total < 8; ++total) {
         if (!agent_recv(&msg, 300)) break;
+        if (msg.type != MSG_DATA) { total--; continue; }
+
+        uint8_t  tt    = msg.raw.data[0];
+        uint16_t val   = (uint16_t)(msg.raw.data[1] | (msg.raw.data[2] << 8));
+        uint8_t  fault = msg.raw.data[6];
+
+        if (tt == TELEM_IMU) { imu_n++; }
+        else { prop_n++; if (val < min_p) min_p = val; if (fault) faults++; }
+        agent_set_progress((uint8_t)((imu_n + prop_n) * 12));
+    }
+
+    kprintf("[ANOM] %d IMU + %d prop samples, %d faults, min_P=%u kPa\n",
+            imu_n, prop_n, faults, min_p);
+
+    message_t res;
+    res.type = MSG_DATA;
+    res.raw.data[0] = (uint8_t)faults;
+    res.raw.data[1] = (uint8_t)(min_p & 0xFF);
+    res.raw.data[2] = (uint8_t)(min_p >> 8);
+    res.raw.len     = 3;
+    agent_send(g_agents[g_current_agent].parent, &res);
+    agent_set_progress(100);
+
+    if (faults > 0) agent_exit(false, "Anomaly: propulsion pressure excursion");
+    else            agent_exit(true,  "All telemetry nominal");
+}
+
+static void demo_reporter_main(void) {
+    agent_set_goal("Compose pre-maneuver health report");
+    agent_set_contract("Analysis result in inbox", "Report printed and verdict sent to grandparent", NULL);
+
+    message_t msg;
+    uint8_t  faults = 0;
+    uint16_t min_p  = 0;
+
+    if (agent_recv(&msg, 100) && msg.type == MSG_DATA) {
+        faults = msg.raw.data[0];
+        min_p  = (uint16_t)(msg.raw.data[1] | (msg.raw.data[2] << 8));
+        agent_set_progress(50);
+    }
+
+    agent_sleep(2);
+    agent_set_progress(100);
+
+    kprintf("\n");
+    kprintf("  ┌────────────────────────────────────────────┐\n");
+    kprintf("  │  PRE-MANEUVER HEALTH REPORT                │\n");
+    kprintf("  ├────────────────────────────────────────────┤\n");
+    kprintf("  │  IMU:         NOMINAL                      │\n");
+    if (faults > 0) {
+        kprintf("  │  Propulsion:  ANOMALY — %u fault(s)        │\n", faults);
+        kprintf("  │  Min P:       %u kPa (BELOW THRESHOLD)    │\n", min_p);
+        kprintf("  │  VERDICT:     HOLD — FAULT DETECTED        │\n");
+    } else {
+        kprintf("  │  Propulsion:  NOMINAL                      │\n");
+        kprintf("  │  Min P:       %u kPa                       │\n", min_p);
+        kprintf("  │  VERDICT:     GO FOR BURN                  │\n");
+    }
+    kprintf("  └────────────────────────────────────────────┘\n\n");
+
+    /* Send verdict to orchestrator's parent (demo_init) */
+    agent_id_t orch_parent = g_agents[g_agents[g_current_agent].parent].parent;
+    if (orch_parent != AGENT_NONE) {
+        message_t verdict;
+        verdict.type        = MSG_DATA;
+        verdict.raw.data[0] = faults > 0 ? 0 : 1;
+        verdict.raw.data[1] = faults;
+        verdict.raw.len     = 2;
+        agent_send(orch_parent, &verdict);
+    }
+
+    agent_exit(true, "Health report transmitted");
+}
+
+typedef enum { PH_COLLECT=0, PH_ANALYZE, PH_REPORT, PH_DONE } orch_phase_t;
+
+static void demo_orchestrator_main(void) {
+    agent_set_goal("Assess spacecraft health before maneuver burn");
+    agent_set_subgoal("Phase 1: spawning parallel collectors");
+    agent_set_contract("Sensors available", "Health verdict delivered to init", NULL);
+
+    orch_phase_t phase = PH_COLLECT;
+
+    agent_id_t att_id = agent_spawn(g_current_agent, "att_collect",
+        "Sample IMU — 4 attitude readings",
+        URGENCY_NORMAL, 100, demo_attitude_main,
+        CAP_SEND | CAP_RECV | CAP_GOAL_SET);
+
+    agent_id_t prop_id = agent_spawn(g_current_agent, "prop_collect",
+        "Sample propulsion — chamber pressure",
+        URGENCY_HIGH, 80, demo_prop_main,
+        CAP_SEND | CAP_RECV | CAP_GOAL_SET);
+
+    agent_set_progress(10);
+
+    int att_done = 0, prop_done = 0, prop_retried = 0;
+    int faults = 0;
+    uint16_t min_p = 0xFFFF;
+    int tcount = 0;
+
+    message_t msg;
+    while (phase == PH_COLLECT) {
+        if (!agent_recv(&msg, 0)) continue;
+        if (msg.type == MSG_DATA) {
+            tcount++;
+            uint8_t  tt    = msg.raw.data[0];
+            uint16_t val   = (uint16_t)(msg.raw.data[1] | (msg.raw.data[2] << 8));
+            uint8_t  fault = msg.raw.data[6];
+            if (tt == TELEM_PROP && val < min_p) min_p = val;
+            if (fault) faults++;
+            agent_set_progress((uint8_t)(10 + tcount * 5));
+        } else if (msg.type == MSG_GOAL_DONE) {
+            if (msg.from == att_id)  { att_done  = 1; kprintf("[ORCH] att complete\n"); }
+            if (msg.from == prop_id) { prop_done = 1; kprintf("[ORCH] prop complete\n"); }
+        } else if (msg.type == MSG_GOAL_FAILED) {
+            if (msg.from == prop_id && !prop_retried) {
+                prop_retried = 1;
+                kprintf("[ORCH] prop FAILED — spawning recovery (CRITICAL)\n");
+                if (min_p == 0xFFFF) min_p = 900;
+                prop_id = agent_spawn(g_current_agent, "prop_recover",
+                    "Re-sample propulsion with fault isolation",
+                    URGENCY_CRITICAL, 60, demo_prop_main,
+                    CAP_SEND | CAP_RECV | CAP_GOAL_SET);
+            } else {
+                /* Second failure: continue with fault flag */
+                prop_done = 1;
+                faults++;
+                kprintf("[ORCH] Recovery also failed — proceeding with fault\n");
