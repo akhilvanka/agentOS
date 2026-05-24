@@ -253,3 +253,130 @@ static void demo_orchestrator_main(void) {
                 prop_done = 1;
                 faults++;
                 kprintf("[ORCH] Recovery also failed — proceeding with fault\n");
+            }
+            if (msg.from == att_id) { att_done = 1; }
+        }
+        if (att_done && prop_done) phase = PH_ANALYZE;
+    }
+
+    /* Phase 2: anomaly detection */
+    agent_set_subgoal("Phase 2: anomaly detection");
+    agent_set_progress(50);
+
+    agent_id_t anom_id = agent_spawn(g_current_agent, "anom_detect",
+        "Detect anomalies in telemetry",
+        URGENCY_HIGH, 150, demo_anom_main,
+        CAP_SEND | CAP_RECV | CAP_GOAL_SET);
+
+    /* Forward representative telemetry to detector */
+    {
+        uint16_t prs[4] = {2100, 2098, min_p < 2000 ? 900 : 2099, 2099};
+        uint8_t  flt[4] = {   0,    0, min_p < 2000 ? 1   :     0,    0};
+        for (int i = 0; i < 4; ++i) {
+            message_t f = {0};
+            f.type = MSG_DATA; f.raw.data[0]=TELEM_IMU;
+            f.raw.data[1]=0xE7; f.raw.data[2]=0x03; /* 999 */
+            f.raw.data[5]=(uint8_t)i; f.raw.data[6]=FAULT_OK; f.raw.len=7;
+            agent_send(anom_id, &f);
+        }
+        for (int i = 0; i < 4; ++i) {
+            message_t f = {0};
+            f.type = MSG_DATA; f.raw.data[0]=TELEM_PROP;
+            f.raw.data[1]=(uint8_t)(prs[i]&0xFF); f.raw.data[2]=(uint8_t)(prs[i]>>8);
+            f.raw.data[5]=(uint8_t)i; f.raw.data[6]=flt[i]; f.raw.len=7;
+            agent_send(anom_id, &f);
+        }
+    }
+
+    while (phase == PH_ANALYZE) {
+        if (!agent_recv(&msg, 0)) continue;
+        if (msg.type == MSG_DATA && msg.from == anom_id) {
+            faults  = msg.raw.data[0];
+            if (faults > 0) {
+                uint16_t p = (uint16_t)(msg.raw.data[1]|(msg.raw.data[2]<<8));
+                if (p < min_p) min_p = p;
+            }
+        } else if (msg.type == MSG_GOAL_DONE  && msg.from == anom_id) { phase = PH_REPORT; }
+          else if (msg.type == MSG_GOAL_FAILED && msg.from == anom_id) { phase = PH_REPORT; }
+    }
+
+    /* Phase 3: report */
+    agent_set_subgoal("Phase 3: composing health report");
+    agent_set_progress(75);
+
+    agent_id_t rep_id = agent_spawn(g_current_agent, "reporter",
+        "Compose pre-maneuver health report",
+        URGENCY_CRITICAL, 50, demo_reporter_main,
+        CAP_SEND | CAP_RECV | CAP_GOAL_SET);
+
+    {
+        message_t f = {0};
+        f.type = MSG_DATA;
+        f.raw.data[0] = (uint8_t)faults;
+        f.raw.data[1] = (uint8_t)(min_p & 0xFF);
+        f.raw.data[2] = (uint8_t)(min_p >> 8);
+        f.raw.len = 3;
+        agent_send(rep_id, &f);
+    }
+
+    while (phase == PH_REPORT) {
+        if (!agent_recv(&msg, 0)) continue;
+        if ((msg.type == MSG_GOAL_DONE || msg.type == MSG_GOAL_FAILED)
+            && msg.from == rep_id) phase = PH_DONE;
+    }
+
+    agent_set_progress(100);
+
+    if (faults > 0) agent_exit(false, "Demo complete — anomaly detected, HOLD");
+    else            agent_exit(true,  "Demo complete — spacecraft GO for burn");
+}
+
+static void demo_init_main(void) {
+    agent_set_goal("Run spacecraft pre-maneuver health check");
+    agent_set_contract(NULL, "Maneuver verdict delivered to console", NULL);
+
+    kprintf("\n[DEMO] Spacecraft health check starting...\n");
+    kprintf("[DEMO] Spawning orchestrator\n\n");
+
+    agent_id_t orch = agent_spawn(g_current_agent, "demo_orch",
+        "Assess spacecraft health before maneuver burn",
+        URGENCY_HIGH, 400, demo_orchestrator_main,
+        CAP_SPAWN | CAP_SEND | CAP_RECV | CAP_GOAL_SET);
+
+    agent_set_progress(25);
+    message_t msg;
+    while (1) {
+        if (!agent_recv(&msg, 0)) continue;
+        if (msg.type == MSG_GOAL_DONE && msg.from == orch) {
+            kprintf("[DEMO] Orchestrator done: nominal\n"); break;
+        }
+        if (msg.type == MSG_GOAL_FAILED && msg.from == orch) {
+            kprintf("[DEMO] Orchestrator done: fault detected\n"); break;
+        }
+        if (msg.type == MSG_DATA) {
+            kprintf("[DEMO] Verdict: %s (faults=%u)\n",
+                    msg.raw.data[0] ? "GO FOR BURN" : "HOLD",
+                    msg.raw.data[1]);
+        }
+    }
+    agent_set_progress(100);
+    agent_exit(true, "Demo complete");
+}
+
+/* ================================================================
+ * Guardian: observes and prints goal tree
+ * ================================================================ */
+
+static void guardian_agent_main(void) {
+    agent_set_goal("Observe system goal tree");
+    agent_set_contract(NULL, "Goal tree printed on schedule", "Never modifies any agent");
+    agent_subscribe(EVT_SHUTDOWN);
+
+    for (;;) {
+        agent_sleep(200);
+        sched_print_goal_tree();
+    }
+}
+
+/* ================================================================
+ * Idle agent (slot 0)
