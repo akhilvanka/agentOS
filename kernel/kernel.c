@@ -1,23 +1,4 @@
-/**
- * AgentOS — Kernel Entry Point
- *
- * General-purpose agentic OS. No demo is hardcoded here — everything
- * is driven through the interactive shell or by dispatching blueprints.
- *
- * Boot sequence:
- *   boot.S → boot2_main (DTB + MM init) → kernel_main
- *     → register blueprints
- *     → spawn idle (slot 0), logger, guardian, shell
- *     → enable traps + timer
- *     → ctx_restore to shell
- *
- * Blueprints registered here (available via `spawn <name>` in the shell):
- *   shell    — interactive UART dispatcher (already running)
- *   logger   — ring-buffer event log
- *   monitor  — periodic system health reporter
- *   guardian — live goal-tree observer
- *   demo     — spacecraft pre-maneuver health assessment
- */
+
 
 #include "agent.h"
 #include "riscv.h"
@@ -35,11 +16,6 @@ extern void trap_entry(void);
 extern void shell_agent_main(void);
 extern void logger_agent_main(void);
 extern void monitor_agent_main(void);
-
-/* ================================================================
- * Built-in demo: spacecraft pre-maneuver health assessment
- * (the full pipeline from the original demo, available as a blueprint)
- * ================================================================ */
 
 #define TELEM_IMU       0
 #define TELEM_PROP      1
