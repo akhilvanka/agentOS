@@ -1,21 +1,4 @@
-/**
- * AgentOS Interactive Shell
- *
- * Runs as URGENCY_NORMAL agent. Reads UART via SBI legacy getchar.
- * Acts as the Solaris "Agent Dispatcher" — lets the user spawn, kill,
- * observe, and query any agent by name or blueprint.
- *
- * Commands:
- *   help                  this help text
- *   ps                    list all agents
- *   tree                  print goal tree
- *   spawn <blueprint>     dispatch a blueprint by name
- *   kill <id>             forcibly terminate an agent
- *   blueprints            list registered agent blueprints
- *   observe <id>          live-watch an agent's goal/progress (q to stop)
- *   stats                 system memory + scheduler statistics
- *   log                   dump recent logger entries
- */
+
 
 #include "agent.h"
 #include "riscv.h"
