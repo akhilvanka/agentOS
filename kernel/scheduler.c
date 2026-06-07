@@ -87,3 +87,97 @@ void trap_handler(void *ctx_ptr) {
     uint64_t scause  = r_scause();
     uint64_t sepc    = r_sepc();
     uint64_t stval   = r_stval();
+
+    /* Save current agent's context */
+    if (g_current_agent != AGENT_NONE) {
+        Agent *cur = &g_agents[g_current_agent];
+        /* ctx is already saved by trap_entry assembly into cur->ctx */
+        if (cur->status == AGENT_RUNNING) cur->status = AGENT_READY;
+        cur->ticks_run += TICKS_PER_TIMER;
+    }
+
+    g_ticks++;
+
+    /* --- Handle cause --- */
+
+    if (scause == SCAUSE_TIMER_IRQ) {
+        /* Reprogram timer for next tick */
+        uint64_t next_t = r_time() + CLINT_FREQ / (1000000 / TIMER_INTERVAL_US);
+        sbi_set_timer(next_t);
+
+        /* Advance sleep timers and deadline counters only on real timer ticks */
+        advance_timers();
+
+    } else if (scause == SCAUSE_ECALL_U || scause == SCAUSE_ECALL_S) {
+                ((rv64_ctx_t *)ctx_ptr)->pc += 4;
+
+    } else if (scause == 3) {
+                ((rv64_ctx_t *)ctx_ptr)->pc += 4;
+
+    } else {
+        /* Unexpected trap — log and continue */
+        kprintf("[TRAP] scause=0x%llx sepc=0x%llx stval=0x%llx agent=%u\n",
+                (unsigned long long)scause,
+                (unsigned long long)sepc,
+                (unsigned long long)stval,
+                (unsigned)g_current_agent);
+    }
+
+    /* --- Goal-directed scheduling --- */
+
+    agent_id_t next_id = pick_next();
+
+    if (next_id == AGENT_NONE) {
+        /* All agents done/failed — print summary and halt */
+        kprintf("\n[SCHED] All agents complete. System summary:\n");
+        for (agent_id_t i = 1; i < MAX_AGENTS; ++i) {
+            Agent *a = &g_agents[i];
+            if (a->status == AGENT_EMPTY) continue;
+            kprintf("  [%2u] %-12s ticks=%-6llu progress=%3u%% done=%u fail=%u\n",
+                    a->id, a->name,
+                    (unsigned long long)a->ticks_run,
+                    a->progress,
+                    a->goal_completions, a->goal_failures);
+        }
+        kprintf("[SCHED] Halting.\n");
+        for (;;) asm volatile("wfi");
+    }
+
+    Agent *next = &g_agents[next_id];
+    next->status = AGENT_RUNNING;
+    g_current_agent = next_id;
+
+        asm volatile("mv tp, %0" : : "r"(&next->ctx));
+
+    ctx_restore(&next->ctx);
+    /* Never returns */
+}
+
+/* ---- Print goal tree (diagnostics) ---- */
+
+void sched_print_goal_tree(void) {
+    kprintf("\n=== AgentOS Goal Tree (tick=%llu) ===\n",
+            (unsigned long long)g_ticks);
+    kprintf("%-4s %-12s %-8s %-4s %-4s %-6s %s\n",
+            "ID", "Name", "Status", "Urg", "Pct", "Ticks", "Goal");
+    kprintf("%s\n", "-------------------------------------------------------------------");
+
+    for (agent_id_t i = 1; i < MAX_AGENTS; ++i) {
+        Agent *a = &g_agents[i];
+        if (a->status == AGENT_EMPTY) continue;
+
+        const char *st = a->status == AGENT_READY    ? "READY  " :
+                         a->status == AGENT_RUNNING   ? "RUNNING" :
+                         a->status == AGENT_WAITING   ? "WAITING" :
+                         a->status == AGENT_SLEEPING  ? "SLEEP  " :
+                         a->status == AGENT_DONE      ? "DONE   " :
+                         a->status == AGENT_FAILED    ? "FAILED " : "?      ";
+
+        kprintf("[%2u] %-12s %s %3u %3u%% %6llu  %s\n",
+                a->id, a->name, st,
+                a->urgency, a->progress,
+                (unsigned long long)a->ticks_run,
+                a->goal);
+    }
+    kprintf("\n");
+}

@@ -11,9 +11,6 @@ Agent g_agents[MAX_AGENTS];
 volatile agent_id_t g_current_agent = AGENT_NONE;
 volatile uint64_t g_ticks = 0;
 
-/* Safe save area for traps that fire while kernel code is running
- * (before the first ctx_restore to an agent). tp points here from
- * startup until the first real agent is scheduled. */
 rv64_ctx_t g_kernel_ctx;
 
 extern void kprintf(const char *fmt, ...);
@@ -107,10 +104,7 @@ agent_id_t agent_spawn(agent_id_t parent,
 
     a->ctx.pc = (uint64_t)(uintptr_t)entry;
     a->ctx.sp = stack_top;
-    /* tp = pointer to this ctx (trap_entry uses tp as the save base).
-     * SPP=1: sret returns to S-mode (agents run in S-mode, not U-mode).
-     * SPIE=1: re-enable interrupts after sret. */
-    a->ctx.tp = (uint64_t)(uintptr_t)&a->ctx;
+        a->ctx.tp = (uint64_t)(uintptr_t)&a->ctx;
     a->ctx.sstatus = SSTATUS_SPIE | SSTATUS_SIE | SSTATUS_SPP;
 
     kprintf("[AGENT] spawn id=%u name='%s' goal='%s' urgency=%u deadline=%u\n",
@@ -228,8 +222,7 @@ void agent_sleep(uint32_t ticks) {
 }
 
 void agent_yield(void) {
-    
-    asm volatile(".word 0x00100073" ::: "memory"); /* EBREAK */
+        asm volatile(".word 0x00100073" ::: "memory"); /* EBREAK */
 }
 
 /* ---- IPC ---- */
@@ -263,8 +256,7 @@ bool agent_send(agent_id_t to, message_t *msg) {
 
 __attribute__((noinline, optimize("O0")))
 bool agent_recv(message_t *out, uint32_t timeout_ticks) {
-    
-    agent_id_t my_id = (agent_id_t)g_current_agent;
+        agent_id_t my_id = (agent_id_t)g_current_agent;
     if (my_id >= MAX_AGENTS || g_agents[my_id].status == AGENT_EMPTY) return false;
 
     uint64_t deadline = g_ticks + timeout_ticks;
@@ -287,7 +279,108 @@ bool agent_recv(message_t *out, uint32_t timeout_ticks) {
         if (inbox_empty(a)) a->status = AGENT_WAITING;
         intr_on();
         agent_yield();
-        /* Compiler barrier: after a context switch, ALL previously cached
-         * memory values (inbox_head, inbox_tail, etc.) may have changed.
-         * Force the compiler to reload from memory on the next iteration. */
+                asm volatile("" ::: "memory");
+    }
+}
+
+/* ---- Event system ---- */
+
+void agent_subscribe(uint32_t mask) {
+    Agent *a = agent_current();
+    if (a) a->event_mask = mask;
+}
+
+void agent_emit_event(agent_id_t target, uint32_t flags) {
+    if (target >= MAX_AGENTS) return;
+    Agent *dst = &g_agents[target];
+    if (dst->status == AGENT_EMPTY) return;
+    intr_off();
+    dst->event_pending |= (flags & dst->event_mask);
+    if (dst->status == AGENT_WAITING && dst->event_pending)
+        dst->status = AGENT_READY;
+    intr_on();
+}
+
+__attribute__((noinline, optimize("O0")))
+uint32_t agent_wait_event(uint32_t mask, uint32_t timeout_ticks) {
+    uint64_t deadline = g_ticks + timeout_ticks;
+    for (;;) {
+        Agent *a = &g_agents[(agent_id_t)g_current_agent];
+        uint32_t fired = a->event_pending & mask;
+        if (fired) {
+            intr_off();
+            a->event_pending &= ~fired;
+            intr_on();
+            return fired;
+        }
+        if (timeout_ticks > 0 && g_ticks >= deadline) return 0;
+        intr_off();
+        a = &g_agents[(agent_id_t)g_current_agent];
+        if (!(a->event_pending & mask)) a->status = AGENT_WAITING;
+        intr_on();
+        agent_yield();
         asm volatile("" ::: "memory");
+    }
+}
+
+/* ---- Blueprint registry ---- */
+
+static agent_blueprint_t g_blueprints[MAX_BLUEPRINTS];
+static int               g_n_blueprints = 0;
+
+void agent_register_blueprint(const agent_blueprint_t *bp) {
+    if (g_n_blueprints >= MAX_BLUEPRINTS) return;
+    g_blueprints[g_n_blueprints++] = *bp;
+}
+
+const agent_blueprint_t *agent_find_blueprint(const char *name) {
+    for (int i = 0; i < g_n_blueprints; ++i) {
+        const char *n = g_blueprints[i].name;
+        int j = 0;
+        while (n[j] && name[j] && n[j] == name[j]) j++;
+        if (!n[j] && !name[j]) return &g_blueprints[i];
+    }
+    return NULL;
+}
+
+int agent_list_blueprints(void) {
+    kprintf("Available agent blueprints (%d):\n", g_n_blueprints);
+    for (int i = 0; i < g_n_blueprints; ++i) {
+        const agent_blueprint_t *b = &g_blueprints[i];
+        kprintf("  %-16s  urgency=%-3u  deadline=%-5u  %s\n",
+                b->name, b->default_urgency, b->default_deadline, b->description);
+    }
+    return g_n_blueprints;
+}
+
+agent_id_t agent_dispatch(agent_id_t parent, const char *bp_name) {
+    const agent_blueprint_t *bp = agent_find_blueprint(bp_name);
+    if (!bp) {
+        kprintf("[AGENT] dispatch: unknown blueprint '%s'\n", bp_name);
+        return AGENT_NONE;
+    }
+    agent_id_t id = agent_spawn(parent,
+                                bp->name,
+                                bp->default_goal,
+                                bp->default_urgency,
+                                bp->default_deadline,
+                                bp->entry,
+                                bp->default_caps);
+    if (id != AGENT_NONE) {
+        /* Record which blueprint spawned this instance */
+        strncpy_safe(g_agents[id].blueprint, bp->name, sizeof(g_agents[id].blueprint));
+    }
+    return id;
+}
+
+/* ---- Accessors ---- */
+
+Agent* agent_current(void) {
+    if (g_current_agent == AGENT_NONE) return NULL;
+    return &g_agents[g_current_agent];
+}
+
+Agent* agent_get(agent_id_t id) {
+    if (id >= MAX_AGENTS) return NULL;
+    return &g_agents[id];
+}

@@ -1,5 +1,4 @@
 
-
 #include "agent.h"
 #include "riscv.h"
 #include "mm.h"
@@ -126,3 +125,144 @@ static void cmd_observe(agent_id_t id) {
         kprintf("  No agent with id=%u\n", id);
         return;
     }
+    kprintf("  Observing agent %u '%s' — press any key to stop\n\n", id, a->name);
+
+    uint8_t last_pct = 0xFF;
+    while (1) {
+        /* Check for keypress */
+        if (sbi_getchar() != -1) break;
+
+        a = agent_get(id);
+        if (!a || a->status == AGENT_EMPTY || a->status == AGENT_DONE
+               || a->status == AGENT_FAILED) {
+            kprintf("  Agent terminated (status=%u)\n", a ? a->status : 0);
+            break;
+        }
+
+        if (a->progress != last_pct) {
+            last_pct = a->progress;
+            const char *st =
+                a->status == AGENT_READY    ? "READY  " :
+                a->status == AGENT_RUNNING  ? "RUNNING" :
+                a->status == AGENT_WAITING  ? "WAITING" :
+                a->status == AGENT_SLEEPING ? "SLEEP  " : "?      ";
+            kprintf("  [%llu] id=%-2u %s  urgency=%-3u  progress=%3u%%  deadline=%u\n"
+                    "         goal: %s\n"
+                    "         sub:  %s\n\n",
+                    (unsigned long long)g_ticks,
+                    id, st, a->urgency, a->progress, a->deadline_ticks,
+                    a->goal[0]    ? a->goal    : "(none)",
+                    a->subgoal[0] ? a->subgoal : "(none)");
+        }
+        agent_yield();
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Command dispatcher                                                   */
+/* ------------------------------------------------------------------ */
+
+static void shell_dispatch(const char *line) {
+    char cmd[32];
+    const char *rest = sh_word(line, cmd, sizeof(cmd));
+
+    if (!cmd[0]) return;
+
+    if (sh_strcmp(cmd, "help") == 0) {
+        cmd_help();
+
+    } else if (sh_strcmp(cmd, "ps") == 0) {
+        cmd_ps();
+
+    } else if (sh_strcmp(cmd, "tree") == 0) {
+        sched_print_goal_tree();
+
+    } else if (sh_strcmp(cmd, "blueprints") == 0) {
+        kprintf("\n");
+        agent_list_blueprints();
+        kprintf("\n");
+
+    } else if (sh_strcmp(cmd, "spawn") == 0) {
+        char name[32];
+        sh_word(rest, name, sizeof(name));
+        if (!name[0]) {
+            kprintf("  usage: spawn <blueprint_name>\n");
+            return;
+        }
+        agent_id_t id = agent_dispatch(AGENT_NONE, name);
+        if (id == AGENT_NONE) {
+            kprintf("  Failed to spawn '%s' — unknown blueprint or table full\n", name);
+        } else {
+            kprintf("  Spawned agent id=%u from blueprint '%s'\n", id, name);
+        }
+
+    } else if (sh_strcmp(cmd, "kill") == 0) {
+        char num[16];
+        sh_word(rest, num, sizeof(num));
+        if (!num[0]) { kprintf("  usage: kill <id>\n"); return; }
+        agent_id_t id = (agent_id_t)sh_atoi(num);
+        agent_kill(id);
+
+    } else if (sh_strcmp(cmd, "observe") == 0) {
+        char num[16];
+        sh_word(rest, num, sizeof(num));
+        if (!num[0]) { kprintf("  usage: observe <id>\n"); return; }
+        cmd_observe((agent_id_t)sh_atoi(num));
+
+    } else if (sh_strcmp(cmd, "stats") == 0) {
+        cmd_stats();
+
+    } else if (sh_strcmp(cmd, "log") == 0) {
+        logger_dump();
+
+    } else {
+        kprintf("  Unknown command '%s'. Type 'help' for options.\n", cmd);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Shell agent main loop                                                */
+/* ------------------------------------------------------------------ */
+
+void shell_agent_main(void) {
+    agent_set_goal("Dispatch and observe agents via UART shell");
+    agent_set_contract(
+        "UART available via SBI",
+        "User commands are dispatched until shutdown",
+        "Shell never holds the CPU without yielding"
+    );
+    agent_subscribe(EVT_SHUTDOWN);
+
+    static char line[128];
+    int pos = 0;
+
+    kprintf("\n  AgentOS shell ready. Type 'help' for commands.\n\n");
+    kprintf("agentOS> ");
+
+    for (;;) {
+        int c = sbi_getchar();
+        if (c == -1) {
+                        agent_sleep(3);
+            continue;
+        }
+
+        if (c == '\r' || c == '\n') {
+            sbi_putchar('\n');
+            line[pos] = '\0';
+            if (pos > 0) shell_dispatch(line);
+            pos = 0;
+            kprintf("agentOS> ");
+
+        } else if ((c == 8 || c == 127) && pos > 0) {
+            /* backspace */
+            pos--;
+            sbi_putchar('\b');
+            sbi_putchar(' ');
+            sbi_putchar('\b');
+
+        } else if (c >= 0x20 && c < 0x7f && pos < (int)sizeof(line) - 1) {
+            line[pos++] = (char)c;
+            sbi_putchar((char)c);
+        }
+    }
+}

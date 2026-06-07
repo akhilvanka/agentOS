@@ -146,3 +146,95 @@ typedef struct Agent {
     /* Identity */
     agent_id_t           id;
     volatile agent_status_t status;      /* modified by scheduler in trap context */
+    char                 name[16];
+    char                 blueprint[16];  /* blueprint name this instance came from */
+
+    /* Goal model (Solaris: every agent declares WHAT, not HOW) */
+    char          goal[MAX_GOAL_LEN];    /* primary goal */
+    char          subgoal[MAX_GOAL_LEN]; /* current sub-task within the goal */
+    uint8_t       urgency;
+    uint8_t       progress;
+    uint8_t       prev_progress;
+    uint32_t      deadline_ticks;
+    uint32_t      sleep_ticks;
+
+    /* Contract: formal pre/post/invariant specification */
+    agent_contract_t contract;
+
+    /* Resource budget (0 = unlimited) */
+    uint32_t      cpu_budget_ticks;      /* max CPU ticks per scheduling period */
+    uint32_t      cpu_used_period;       /* ticks consumed in current period */
+
+    /* Capability table */
+    cap_t         caps[MAX_CAPS];
+
+    /* Hierarchy */
+    agent_id_t    parent;
+    agent_id_t    children[MAX_CHILDREN];
+    uint8_t       n_children;
+
+    /* Event subscription */
+    volatile uint32_t event_mask;        /* events this agent subscribes to */
+    volatile uint32_t event_pending;     /* events that have fired, not yet consumed */
+
+    /* IPC inbox (ring buffer) */
+    message_t     inbox[INBOX_SIZE];
+    volatile uint8_t inbox_head;
+    volatile uint8_t inbox_tail;
+
+    /* Statistics */
+    uint64_t      ticks_run;
+    uint64_t      ticks_waiting;
+    uint32_t      goal_completions;
+    uint32_t      goal_failures;
+    uint32_t      messages_sent;
+    uint32_t      messages_recv;
+
+    /* Stack */
+    uint8_t       stack[STACK_SIZE] __attribute__((aligned(16)));
+} Agent;
+
+/* The global agent table */
+extern Agent g_agents[MAX_AGENTS];
+/* volatile: trap handler modifies these; compiler must reload on every access */
+extern volatile agent_id_t g_current_agent;
+extern volatile uint64_t g_ticks;
+extern rv64_ctx_t g_kernel_ctx; /* safe save area during kernel init (tp points here) */
+
+/* ---- Core API ---- */
+
+agent_id_t agent_spawn(agent_id_t parent,
+                       const char *name,
+                       const char *goal,
+                       urgency_t urgency,
+                       uint32_t deadline_ticks,
+                       void (*entry)(void),
+                       cap_flags_t caps);
+
+void agent_exit(bool success, const char *reason);
+void agent_set_progress(uint8_t pct);
+void agent_set_goal(const char *goal);
+void agent_set_subgoal(const char *subgoal);   /* fine-grained current task */
+void agent_set_contract(const char *pre, const char *post, const char *inv);
+void agent_sleep(uint32_t ticks);
+void agent_yield(void);
+void agent_kill(agent_id_t id);                /* forcibly terminate any agent */
+
+bool agent_send(agent_id_t to, message_t *msg);
+bool agent_recv(message_t *out, uint32_t timeout_ticks);
+
+/* Event API */
+void     agent_subscribe(uint32_t event_mask);
+uint32_t agent_wait_event(uint32_t mask, uint32_t timeout_ticks);
+void     agent_emit_event(agent_id_t target, uint32_t event_flags);
+
+Agent* agent_current(void);
+Agent* agent_get(agent_id_t id);
+
+/* ---- Blueprint registry (Solaris: agent dispatcher) ---- */
+
+void                       agent_register_blueprint(const agent_blueprint_t *bp);
+const agent_blueprint_t   *agent_find_blueprint(const char *name);
+int                        agent_list_blueprints(void);  /* returns count */
+/* Spawn an agent by blueprint name; returns AGENT_NONE on failure */
+agent_id_t                 agent_dispatch(agent_id_t parent, const char *bp_name);

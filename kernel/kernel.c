@@ -1,5 +1,4 @@
 
-
 #include "agent.h"
 #include "riscv.h"
 #include "mm.h"
@@ -339,10 +338,6 @@ static void demo_init_main(void) {
     agent_exit(true, "Demo complete");
 }
 
-/* ================================================================
- * Guardian: observes and prints goal tree
- * ================================================================ */
-
 static void guardian_agent_main(void) {
     agent_set_goal("Observe system goal tree");
     agent_set_contract(NULL, "Goal tree printed on schedule", "Never modifies any agent");
@@ -354,5 +349,120 @@ static void guardian_agent_main(void) {
     }
 }
 
-/* ================================================================
- * Idle agent (slot 0)
+static void idle_agent_main(void) {
+    for (;;) {
+        asm volatile("wfi");
+        agent_yield();
+    }
+}
+
+static void register_blueprints(void) {
+    static const agent_blueprint_t bps[] = {
+        {
+            .name            = "shell",
+            .description     = "Interactive UART agent dispatcher shell",
+            .default_goal    = "Dispatch and observe agents via UART shell",
+            .default_urgency = URGENCY_NORMAL,
+            .default_deadline= 0,
+            .default_caps    = CAP_SPAWN | CAP_SEND | CAP_RECV | CAP_GOAL_SET | CAP_OBSERVE,
+            .entry           = shell_agent_main,
+        },
+        {
+            .name            = "logger",
+            .description     = "Ring-buffer system event log",
+            .default_goal    = "Record system events to ring-buffer log",
+            .default_urgency = URGENCY_NORMAL,
+            .default_deadline= 0,
+            .default_caps    = CAP_RECV | CAP_GOAL_SET,
+            .entry           = logger_agent_main,
+        },
+        {
+            .name            = "monitor",
+            .description     = "Periodic system health reporter",
+            .default_goal    = "Report system health periodically",
+            .default_urgency = URGENCY_BACKGROUND,
+            .default_deadline= 0,
+            .default_caps    = CAP_OBSERVE | CAP_GOAL_SET,
+            .entry           = monitor_agent_main,
+        },
+        {
+            .name            = "guardian",
+            .description     = "Background goal-tree observer",
+            .default_goal    = "Observe system goal tree",
+            .default_urgency = URGENCY_BACKGROUND,
+            .default_deadline= 0,
+            .default_caps    = CAP_OBSERVE | CAP_GOAL_SET,
+            .entry           = guardian_agent_main,
+        },
+        {
+            .name            = "demo",
+            .description     = "Spacecraft pre-maneuver health assessment",
+            .default_goal    = "Run spacecraft pre-maneuver health check",
+            .default_urgency = URGENCY_NORMAL,
+            .default_deadline= 0,
+            .default_caps    = CAP_SPAWN | CAP_SEND | CAP_RECV | CAP_GOAL_SET,
+            .entry           = demo_init_main,
+        },
+    };
+
+    for (int i = 0; i < (int)(sizeof(bps)/sizeof(bps[0])); ++i)
+        agent_register_blueprint(&bps[i]);
+}
+
+void kernel_main(void) {
+    kprintf("[KERNEL] Initialising agent table  (MAX_AGENTS=%d  STACK=%d  INBOX=%d)\n",
+            MAX_AGENTS, STACK_SIZE, INBOX_SIZE);
+
+    memset(g_agents, 0, sizeof(g_agents));
+    g_current_agent = AGENT_NONE;
+    g_ticks         = 0;
+
+    /* Register all known agent blueprints */
+    register_blueprints();
+
+    /* Slot 0: idle agent (always exists) */
+    g_agents[0].id          = 0;
+    g_agents[0].status      = AGENT_READY;
+    g_agents[0].urgency     = URGENCY_BACKGROUND;
+    memcpy(g_agents[0].name, "idle", 5);
+    memcpy(g_agents[0].goal, "Wait for runnable agents", 25);
+    g_agents[0].ctx.pc      = (uint64_t)(uintptr_t)idle_agent_main;
+    g_agents[0].ctx.sp      = (uint64_t)(uintptr_t)g_agents[0].stack + STACK_SIZE;
+    g_agents[0].ctx.tp      = (uint64_t)(uintptr_t)&g_agents[0].ctx;
+    g_agents[0].ctx.sstatus = SSTATUS_SPIE | SSTATUS_SIE | SSTATUS_SPP;
+
+    /* Spawn logger (id=1, receives log_write calls) */
+    agent_id_t logger_id = agent_dispatch(AGENT_NONE, "logger");
+    if (logger_id == AGENT_NONE) {
+        kprintf("[KERNEL] FATAL: logger spawn failed\n");
+        for (;;) asm volatile("wfi");
+    }
+
+    /* Spawn shell (id=2, the primary user interface) */
+    agent_id_t shell_id = agent_dispatch(AGENT_NONE, "shell");
+    if (shell_id == AGENT_NONE) {
+        kprintf("[KERNEL] FATAL: shell spawn failed\n");
+        for (;;) asm volatile("wfi");
+    }
+
+    /* Spawn guardian and monitor as background observers */
+    agent_dispatch(AGENT_NONE, "guardian");
+    agent_dispatch(AGENT_NONE, "monitor");
+
+    kprintf("[KERNEL] %d agents ready. Entering shell (id=%u)...\n\n",
+            (int)(logger_id + 3), shell_id);
+
+    /* Install trap vector and arm timer */
+    w_stvec((uint64_t)(uintptr_t)trap_entry);
+    asm volatile("mv tp, %0" : : "r"(&g_kernel_ctx));
+    w_sie(r_sie() | SIE_STIE);
+    sbi_set_timer(r_time() + 10000000UL / 100UL);
+
+    /* Jump into the shell agent */
+    g_current_agent = shell_id;
+    g_agents[shell_id].status = AGENT_RUNNING;
+    asm volatile("mv tp, %0" : : "r"(&g_agents[shell_id].ctx));
+    ctx_restore(&g_agents[shell_id].ctx);
+
+    for (;;) asm volatile("wfi");
+}
