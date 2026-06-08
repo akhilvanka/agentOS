@@ -283,6 +283,20 @@ bool agent_recv(message_t *out, uint32_t timeout_ticks) {
     }
 }
 
+bool agent_try_recv(message_t *out) {
+    Agent *a = agent_current();
+    if (!a) return false;
+    intr_off();
+    if (inbox_empty(a)) {
+        intr_on();
+        return false;
+    }
+    *out = a->inbox[a->inbox_head];
+    a->inbox_head = (a->inbox_head + 1) % INBOX_SIZE;
+    intr_on();
+    return true;
+}
+
 /* ---- Event system ---- */
 
 void agent_subscribe(uint32_t mask) {
@@ -341,6 +355,15 @@ const agent_blueprint_t *agent_find_blueprint(const char *name) {
         if (!n[j] && !name[j]) return &g_blueprints[i];
     }
     return NULL;
+}
+
+int agent_blueprint_count(void) {
+    return g_n_blueprints;
+}
+
+const agent_blueprint_t *agent_blueprint_at(int i) {
+    if (i < 0 || i >= g_n_blueprints) return NULL;
+    return &g_blueprints[i];
 }
 
 int agent_list_blueprints(void) {

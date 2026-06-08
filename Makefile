@@ -40,6 +40,7 @@ SRCS_C   = kernel/kernel.c \
            kernel/mm.c \
            kernel/boot2.c \
            kernel/shell.c \
+           kernel/taskmgr.c \
            agents/logger.c \
            agents/monitor.c \
            drivers/uart.c

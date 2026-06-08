@@ -119,6 +119,7 @@ typedef struct {
 typedef struct {
     char         name[16];            /* short identifier used in shell */
     char         description[64];     /* human-readable purpose */
+    char         skills[64];          /* space-separated keywords for goal matching */
     char         default_goal[MAX_GOAL_LEN];
     urgency_t    default_urgency;
     uint32_t     default_deadline;    /* 0 = no deadline */
@@ -222,6 +223,7 @@ void agent_kill(agent_id_t id);                /* forcibly terminate any agent *
 
 bool agent_send(agent_id_t to, message_t *msg);
 bool agent_recv(message_t *out, uint32_t timeout_ticks);
+bool agent_try_recv(message_t *out);           /* non-blocking */
 
 /* Event API */
 void     agent_subscribe(uint32_t event_mask);
@@ -238,3 +240,17 @@ const agent_blueprint_t   *agent_find_blueprint(const char *name);
 int                        agent_list_blueprints(void);  /* returns count */
 /* Spawn an agent by blueprint name; returns AGENT_NONE on failure */
 agent_id_t                 agent_dispatch(agent_id_t parent, const char *bp_name);
+/* Registry iteration (used by the task manager for goal matching) */
+int                        agent_blueprint_count(void);
+const agent_blueprint_t   *agent_blueprint_at(int i);
+
+/* ---- Task manager (Solaris: agent task manager) ---- */
+
+/* Ask the OS to achieve a goal. The task manager matches the goal text
+ * against blueprint skills and dispatches the best fit. The result comes
+ * back to the requester as MSG_GOAL_DONE / MSG_GOAL_FAILED. */
+bool agent_request_goal(const char *goal, urgency_t urgency);
+
+void taskmgr_agent_main(void);
+void taskmgr_print_delegations(void);
+extern agent_id_t g_taskmgr_id;
