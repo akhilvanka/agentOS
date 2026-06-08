@@ -190,6 +190,7 @@ typedef struct Agent {
     uint32_t      goal_failures;
     uint32_t      messages_sent;
     uint32_t      messages_recv;
+    uint8_t       fault_handled;       /* dispatcher already reacted to this failure */
 
     /* Stack */
     uint8_t       stack[STACK_SIZE] __attribute__((aligned(16)));
@@ -254,3 +255,17 @@ bool agent_request_goal(const char *goal, urgency_t urgency);
 void taskmgr_agent_main(void);
 void taskmgr_print_delegations(void);
 extern agent_id_t g_taskmgr_id;
+
+/* ---- Dispatcher auto-activation (Solaris: agent dispatcher) ---- */
+
+typedef enum {
+    TRIG_AGENT_FAILED = 0,   /* any agent enters FAILED and nothing reacted yet */
+    TRIG_MEM_USED_PCT = 1,   /* heap usage at or above threshold percent */
+    TRIG_AGENT_COUNT  = 2,   /* live agents at or above threshold */
+} trigger_kind_t;
+
+/* Returns rule index, or -1 if the rule table is full */
+int  dispatcher_add_rule(trigger_kind_t kind, uint32_t threshold,
+                         const char *blueprint, uint32_t cooldown_ticks);
+void dispatcher_print_rules(void);
+void dispatcher_agent_main(void);

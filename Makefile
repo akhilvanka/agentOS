@@ -41,8 +41,10 @@ SRCS_C   = kernel/kernel.c \
            kernel/boot2.c \
            kernel/shell.c \
            kernel/taskmgr.c \
+           kernel/dispatcher.c \
            agents/logger.c \
            agents/monitor.c \
+           agents/triage.c \
            drivers/uart.c
 
 SRCS_S   = kernel/boot.S
