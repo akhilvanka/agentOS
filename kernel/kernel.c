@@ -15,6 +15,7 @@ extern void trap_entry(void);
 extern void shell_agent_main(void);
 extern void logger_agent_main(void);
 extern void monitor_agent_main(void);
+extern void triage_agent_main(void);
 
 #define TELEM_IMU       0
 #define TELEM_PROP      1
@@ -370,6 +371,7 @@ static void register_blueprints(void) {
         {
             .name            = "logger",
             .description     = "Ring-buffer system event log",
+            .skills          = "log record events history",
             .default_goal    = "Record system events to ring-buffer log",
             .default_urgency = URGENCY_NORMAL,
             .default_deadline= 0,
@@ -379,6 +381,7 @@ static void register_blueprints(void) {
         {
             .name            = "monitor",
             .description     = "Periodic system health reporter",
+            .skills          = "monitor report system memory status watch",
             .default_goal    = "Report system health periodically",
             .default_urgency = URGENCY_BACKGROUND,
             .default_deadline= 0,
@@ -388,6 +391,7 @@ static void register_blueprints(void) {
         {
             .name            = "guardian",
             .description     = "Background goal-tree observer",
+            .skills          = "observe goal tree agents",
             .default_goal    = "Observe system goal tree",
             .default_urgency = URGENCY_BACKGROUND,
             .default_deadline= 0,
@@ -397,11 +401,40 @@ static void register_blueprints(void) {
         {
             .name            = "demo",
             .description     = "Spacecraft pre-maneuver health assessment",
+            .skills          = "health check spacecraft telemetry assess maneuver burn imu",
             .default_goal    = "Run spacecraft pre-maneuver health check",
             .default_urgency = URGENCY_NORMAL,
             .default_deadline= 0,
             .default_caps    = CAP_SPAWN | CAP_SEND | CAP_RECV | CAP_GOAL_SET,
             .entry           = demo_init_main,
+        },
+        {
+            .name            = "taskmgr",
+            .description     = "Routes goal requests to matching blueprints",
+            .default_goal    = "Route goal requests to specialized agents",
+            .default_urgency = URGENCY_HIGH,
+            .default_deadline= 0,
+            .default_caps    = CAP_SPAWN | CAP_SEND | CAP_RECV | CAP_GOAL_SET | CAP_OBSERVE,
+            .entry           = taskmgr_agent_main,
+        },
+        {
+            .name            = "dispatcher",
+            .description     = "Activates agents when trigger rules fire",
+            .default_goal    = "Activate agents when trigger conditions arise",
+            .default_urgency = URGENCY_HIGH,
+            .default_deadline= 0,
+            .default_caps    = CAP_SPAWN | CAP_SEND | CAP_OBSERVE | CAP_GOAL_SET,
+            .entry           = dispatcher_agent_main,
+        },
+        {
+            .name            = "triage",
+            .description     = "Post-mortem analysis of a failed agent",
+            .skills          = "diagnose failure triage debug postmortem inspect",
+            .default_goal    = "Diagnose most recent agent failure",
+            .default_urgency = URGENCY_HIGH,
+            .default_deadline= 300,
+            .default_caps    = CAP_RECV | CAP_OBSERVE | CAP_GOAL_SET,
+            .entry           = triage_agent_main,
         },
     };
 
@@ -449,8 +482,19 @@ void kernel_main(void) {
     agent_dispatch(AGENT_NONE, "guardian");
     agent_dispatch(AGENT_NONE, "monitor");
 
+    /* Task manager: routes 'delegate' goal requests to blueprints */
+    agent_dispatch(AGENT_NONE, "taskmgr");
+
+    /* Dispatcher: auto-activates agents when trigger rules fire.
+     * Default rule: any unhandled agent failure spawns a triage agent. */
+    dispatcher_add_rule(TRIG_AGENT_FAILED, 0, "triage", 50);
+    agent_dispatch(AGENT_NONE, "dispatcher");
+
+    int n_ready = 0;
+    for (agent_id_t i = 0; i < MAX_AGENTS; ++i)
+        if (g_agents[i].status != AGENT_EMPTY) n_ready++;
     kprintf("[KERNEL] %d agents ready. Entering shell (id=%u)...\n\n",
-            (int)(logger_id + 3), shell_id);
+            n_ready, shell_id);
 
     /* Install trap vector and arm timer */
     w_stvec((uint64_t)(uintptr_t)trap_entry);

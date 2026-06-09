@@ -52,6 +52,9 @@ static void cmd_help(void) {
     kprintf("    tree                  print live goal tree\n");
     kprintf("    blueprints            list available agent blueprints\n");
     kprintf("    spawn <blueprint>     dispatch an agent by blueprint name\n");
+    kprintf("    delegate <goal...>    ask the task manager to achieve a goal\n");
+    kprintf("    delegations           show task manager delegation table\n");
+    kprintf("    rules                 show dispatcher auto-activation rules\n");
     kprintf("    kill <id>             forcibly terminate an agent\n");
     kprintf("    observe <id>          watch an agent live (any key to stop)\n");
     kprintf("    stats                 memory and scheduler statistics\n");
@@ -196,6 +199,24 @@ static void shell_dispatch(const char *line) {
             kprintf("  Spawned agent id=%u from blueprint '%s'\n", id, name);
         }
 
+    } else if (sh_strcmp(cmd, "delegate") == 0) {
+        const char *goal = sh_skip(rest);
+        if (!*goal) {
+            kprintf("  usage: delegate <goal text>\n");
+            kprintf("  e.g.   delegate check spacecraft health\n");
+            return;
+        }
+        if (agent_request_goal(goal, URGENCY_NORMAL))
+            kprintf("  Goal submitted to task manager\n");
+        else
+            kprintf("  Task manager unavailable\n");
+
+    } else if (sh_strcmp(cmd, "delegations") == 0) {
+        taskmgr_print_delegations();
+
+    } else if (sh_strcmp(cmd, "rules") == 0) {
+        dispatcher_print_rules();
+
     } else if (sh_strcmp(cmd, "kill") == 0) {
         char num[16];
         sh_word(rest, num, sizeof(num));
@@ -240,9 +261,20 @@ void shell_agent_main(void) {
     kprintf("agentOS> ");
 
     for (;;) {
+        /* Surface async results (e.g. delegated goals completing) */
+        message_t note;
+        while (agent_try_recv(&note)) {
+            if (note.type == MSG_GOAL_DONE)
+                kprintf("\n  [task] delegated goal done: %s\nagentOS> ",
+                        note.done.reason);
+            else if (note.type == MSG_GOAL_FAILED)
+                kprintf("\n  [task] delegated goal failed: %s\nagentOS> ",
+                        note.done.reason);
+        }
+
         int c = sbi_getchar();
         if (c == -1) {
-                        agent_sleep(3);
+            agent_sleep(3);
             continue;
         }
 
